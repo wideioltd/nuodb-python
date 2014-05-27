@@ -13,8 +13,8 @@ DOMAIN_USER     = "domain"
 DOMAIN_PASSWORD = "bird"
 
 DBA_USER        = 'dba'
-DBA_PASSWORD    = 'dba_password'
-DATABASE_NAME   = 'pynuodb_test'
+DBA_PASSWORD    = 'dba'
+DATABASE_NAME   = 'test'
 
 class NuoBase(unittest.TestCase):
     driver = pynuodb
