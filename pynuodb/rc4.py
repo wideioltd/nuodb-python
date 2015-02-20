@@ -20,12 +20,12 @@ class RC4(object):
         self.key=key
 
     def __enter__(self):
-        self.rc4obj = rc4_lib.init_rc4(self.key) 
+        self.rc4obj = rc4_lib.init_rc4(self.key,len(self.key)) 
         return self
 
     def transform(self,msg):
         message_inplace = create_string_buffer(msg)
-        rc4_lib.transform_rc4(self.rc4obj, message_inplace)
+        rc4_lib.transform_rc4(self.rc4obj, message_inplace,len(msg))
         return string_at(message_inplace)
 
     def __exit__(self, exc_type, exc_value, traceback):

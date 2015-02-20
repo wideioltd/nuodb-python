@@ -15,45 +15,42 @@ typedef struct rc4_s {
 } rc4_t;
 
 
-rc4_t* init_rc4(char* key)
+rc4_t* init_rc4(char* key, int kl)
 {
-    rc4_t * rc4 = malloc(sizeof(rc4_t)); //not type casting?  (rc4_t *)(..._)
+    rc4_t * rc4 = (rc4_t*)malloc(sizeof(rc4_t));
     if (!rc4)
         exit(-1);
 
     rc4->__s1 = 0;
     rc4->__s2 = 0;
 
-    unsigned int i; //C11 or C99 only
+    unsigned int i; 
     for(i=0;i<256;i++)
         rc4->state[i] = i;
-    unsigned int kl = strlen(key);
-    unsigned int j=0;
+
+    unsigned char j=0;
     for(i=0;i<256;i++) //i must be int (unsigned char or char is not enough)
     {
-        j +=  rc4->state[i] + ((unsigned int)key[i % kl]) ;
-        j = j % (unsigned int)256; 
+        j +=  rc4->state[i] + key[i % kl] ;
         register unsigned char temp = rc4->state[i];
         rc4->state[i] = rc4->state[j];
-        rc4->state[j] = temp; //todo: more clever
+        rc4->state[j] = temp; 
     }
     return rc4;
 }
 
-void transform_rc4(rc4_t * rc4, char* msg)
+void transform_rc4(rc4_t * rc4, char* msg, int mlen)
 {
-    int mlen=strlen(msg);
     int ci;
     for(ci=0;ci<mlen;ci++){
-        rc4->__s1++; //mod 256
-        rc4->__s2 += rc4->state[rc4->__s1]; //mod 256
+        //rc4->__s1++; 
+        rc4->__s2 += rc4->state[++(rc4->__s1)]; 
         register unsigned char temp = rc4->state[rc4->__s1];
         rc4->state[rc4->__s1] = rc4->state[rc4->__s2];
-        rc4->state[rc4->__s2] = temp; //todo: more clever swap
+        rc4->state[rc4->__s2] = temp; 
 
-        unsigned char i2=rc4->state[rc4->__s1] + rc4->state[rc4->__s2];
-        unsigned char cy = msg[ci] ^ rc4->state[i2];
-        msg[ci] = cy;
+        temp=rc4->state[rc4->__s1] + rc4->state[rc4->__s2];
+        msg[ci] ^= rc4->state[temp];
     }
 }
 
@@ -64,10 +61,16 @@ void free_rc4(rc4_t * rc4)
 
 
 
+
+
+
+
+
+#if WITH_TESTS
 void
 test()
 {
-    rc4_t* rp = init_rc4("hello");
+    rc4_t* rp = init_rc4("hello",strlen("hello"));
     char*text="Bye"; 
     char * buffer1 = malloc(strlen(text));
     if(!buffer1){
@@ -79,7 +82,7 @@ test()
     int i;
     for(i=0;i<2;i++){
         printf ( "'%s' --> ",buffer1);
-        transform_rc4(rp, buffer1);
+        transform_rc4(rp, buffer1,strlen(buffer1));
         printf ( "'%s'\n",buffer1);
     }
     free(buffer1);buffer1=0;
@@ -90,16 +93,8 @@ test()
 int
 main(int argc, char *argv[])
 {
-    if(argc>1)
-    {
-        //printf("argv[0]=%s \n",argv[0]);
-        //printf("argv[1]=%s \n",argv[1]);
-    }
-    int ii;
-    for(ii=0;ii<argc;ii++){
-        printf("argv[%d]=%s \n",ii,argv[ii]);
-    }
 
     test();
     printf("\n");
 }
+#endif
