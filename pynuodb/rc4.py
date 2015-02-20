@@ -24,9 +24,10 @@ class RC4(object):
         return self
 
     def transform(self,msg):
+        sz=len(msg)
         message_inplace = create_string_buffer(msg)
-        rc4_lib.transform_rc4(self.rc4obj, message_inplace,len(msg))
-        return string_at(message_inplace)
+        rc4_lib.transform_rc4(self.rc4obj, message_inplace,sz)
+        return string_at(message_inplace,sz)
 
     def __exit__(self, exc_type, exc_value, traceback):
         rc4_lib.free_rc4(self.rc4obj)
