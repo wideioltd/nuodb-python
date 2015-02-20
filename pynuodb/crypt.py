@@ -239,8 +239,9 @@ try:
           self.rc4=self.rc4.__enter__()
       def __del__(self):
           self.rc4.__exit__(None,None,None)
-      def transform(t):
-          return self.rc.transform()
+      def transform(self,t):
+          return self.rc4.transform(t)
+      
 except Exception,e:
   print e
   class RC4Cipher:
