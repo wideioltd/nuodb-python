@@ -234,8 +234,8 @@ try:
   import rc4
   class RC4Cipher:
       def __init__(self,key):
-          self.key
-          self.rc4=rc4.RC4(key)
+          self.key=key
+          self.rc4=rc4.RC4(self.key)
           self.rc4=self.rc4.__enter__()
       def __del__(self):
           self.rc4.__exit__(None,None,None)
