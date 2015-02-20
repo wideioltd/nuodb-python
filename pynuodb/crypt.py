@@ -230,9 +230,20 @@ class ServerPassword(RemotePassword):
         md.update(secretBytes)
 
         return md.digest()
-
-class RC4Cipher:
-
+try:
+  import rc4
+  class RC4Cipher:
+      def __init__(self,key):
+          self.key
+          self.rc4=rc4.RC4(key)
+          self.rc4=self.rc4.__enter__()
+      def __del__(self):
+          self.rc4.__exit__(None,None,None)
+      def transform(t):
+          return self.rc.transform()
+except Exception,e:
+  print e
+  class RC4Cipher:
     def __init__(self, key):
         self.__S = range(256)
         self.__s1 = 0
