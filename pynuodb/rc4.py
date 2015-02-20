@@ -2,14 +2,14 @@ import os,sys
 from ctypes import cdll,create_string_buffer,string_at
 
 this_dir = os.path.abspath(os.path.dirname(__file__))
-rc4_sofile = os.path.join(this_dir, 'rc4.so')
+rc4_sofile = os.path.join(this_dir, 'rc4impl.so')
 def build_rc4():
-    os.system('cd %s; gcc rc4impl.c -c -fPIC -o rc4.o; gcc -shared ./rc4.o -o rc4.so' % this_dir)
+    os.system('cd %s; gcc rc4impl.c -c -fPIC -o rc4impl.o; gcc -shared ./rc4impl.o -o rc4impl.so' % this_dir)
 if (not os.path.exists(rc4_sofile)) or (os.stat(os.path.join(this_dir, 'rc4impl.c')).st_mtime > os.stat(rc4_sofile).st_mtime):
     build_rc4()
 if not os.path.exists(rc4_sofile):
     sys.stderr.write('Failed to build cimpl library with:\n')
-    sys.stderr.write('  gcc rc4impl.c -c -fPIC -o rc4.o; gcc -shared ./rc4.o -o rc4.so\n')
+    sys.stderr.write('  gcc rc4impl.c -c -fPIC -o rc4impl.o; gcc -shared ./rc4impl.o -o rc4impl.so\n')
     raise Exception('Wrapper library not built.')
 
 
