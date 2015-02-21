@@ -10,6 +10,8 @@ setup(
     keywords='nuodb scalable cloud database',
     packages=['pynuodb'],
     package_dir={'pynuodb': 'pynuodb'},
+    package_data={'pynuodb': ['*.c']},
+#    data_files=[('lib', ['rc4impl.c']),
     url='https://github.com/nuodb/nuodb-python',
     license='BSD licence, see LICENCE.txt',
     long_description=open('README.md').read(),
