@@ -12,6 +12,8 @@ setup(
     packages=['pynuodb'],
     ext_modules = cythonize("pynuodb/encodedsession.pyx"),    
     package_dir={'pynuodb': 'pynuodb'},
+    package_data={'pynuodb': ['*.c']},
+#    data_files=[('lib', ['rc4impl.c']),
     url='https://github.com/nuodb/nuodb-python',
     license='BSD licence, see LICENCE.txt',
     long_description=open('README.md').read(),
