@@ -1,13 +1,16 @@
+# cython: profile=True
 """A module for housing the EncodedSession class.
 
 Exported Classes:
 EncodedSession -- Class for representing an encoded session with the database.
 """
 
-__all__  = [ 'EncodedSession' ]
-
 from crypt import toByteString, fromByteString, toSignedByteString, fromSignedByteString
-from session import Session, SessionException
+from crypt import ClientPassword, RC4Cipher
+
+from exception import DataError, EndOfStream, ProgrammingError, db_error_handler, BatchError
+from datatype import TypeObjectFromNuodb
+
 
 import uuid
 import struct
@@ -15,17 +18,292 @@ import protocol
 import datatype
 import decimal
 import sys
+import socket
+import string
+import struct
+import threading
+import sys
+import xml.etree.ElementTree as ElementTree
 
-from exception import DataError, EndOfStream, ProgrammingError, db_error_handler, BatchError
-from datatype import TypeObjectFromNuodb
+
 
 from statement import Statement, PreparedStatement, ExecutionResult
 from result_set import ResultSet
 
-# from nuodb.util import getCloudEntry
-# (host, port) = getCloudEntry(broker, dbName, connectionKeys)
 
-class EncodedSession(Session):
+def checkForError(message):
+    root = ElementTree.fromstring(message)
+    if root.tag == "Error":
+        raise SessionException(root.get("text"))
+
+
+class SessionException(Exception):
+    def __init__(self, value):
+        self.__value = value
+    def __str__(self):
+        return repr(self.__value)
+
+
+cdef class Session:
+    __AUTH_REQ = "<Authorize TargetService=\"%s\" Type=\"SRP\"/>"
+    __SRP_REQ = "<SRPRequest ClientKey=\"%s\" Cipher=\"RC4\" Username=\"%s\"/>"
+
+    __SERVICE_REQ = "<Request Service=\"%s\"%s/>"
+    __SERVICE_CONN = "<Connect Service=\"%s\"%s/>"
+
+    cdef object __address
+    cdef int __port
+    cdef object __sock
+    
+    cdef object __cipherIn
+    cdef object __cipherOut
+    cdef object __service
+    
+    def __init__(self, host, port=None, service="Identity"):
+        if not port:
+            hostElements = host.split(":")
+            if len(hostElements) == 2:
+                host = hostElements[0]
+                port = int(hostElements[1])
+            else:
+                port = 48004
+
+        self.__address = host
+        self.__port = port
+
+        self.__sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.__sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        self.__sock.connect((host, port))
+
+        self.__cipherOut = None
+        self.__cipherIn = None
+
+        self.__service = service
+
+    @property
+    def address(self):
+        return self.__address
+
+    @property
+    def port(self):
+        return self.__port
+
+    # NOTE: This routine works only for agents ... see the sql module for a
+    # still-in-progress example of opening an authorized engine session
+    def authorize(self, account="domain", password=None):
+        if not password:
+            raise SessionException("A password is required for authorization")
+
+        cp = ClientPassword()
+        key = cp.genClientKey()
+
+        self.send(Session.__AUTH_REQ % self.__service)
+        response = self.__sendAndReceive(Session.__SRP_REQ % (key, account))
+
+        root = ElementTree.fromstring(response)
+        if root.tag != "SRPResponse":
+            self.close()
+            raise SessionException("Request for authorization was denied")
+
+        salt = root.get("Salt")
+        serverKey = root.get("ServerKey")
+        sessionKey = cp.computeSessionKey(account, password, salt, serverKey)
+
+        self._setCiphers(RC4Cipher(sessionKey), RC4Cipher(sessionKey))
+
+        verifyMessage = self.recv()
+        try:
+            root = ElementTree.fromstring(verifyMessage)
+        except Exception as e:
+            self.close()
+            raise SessionException("Failed to establish session with password: " + str(e)), None, sys.exc_info()[2]
+
+        if root.tag != "PasswordVerify":
+            self.close()
+            raise SessionException("Unexpected verification response: " + root.tag)
+
+        self.send(verifyMessage)
+
+    def _setCiphers(self, cipherIn, cipherOut):
+        self.__cipherIn = cipherIn
+        self.__cipherOut = cipherOut
+
+    # Issues the request, closes the session and returns the response string,
+    # or raises an exeption if the session fails or the response is an error.
+    def doRequest(self, attributes=None, text=None, children=None):
+        requestStr = self.__constructServiceMessage(Session.__SERVICE_REQ, attributes, text, children)
+
+        try:
+            response = self.__sendAndReceive(requestStr)
+            checkForError(response)
+
+            return response
+        finally:
+            self.close()
+
+    def doConnect(self, attributes=None, text=None, children=None):    
+        connectStr = self.__constructServiceMessage(Session.__SERVICE_CONN, attributes, text, children)
+
+        try:
+            self.send(connectStr)
+        except Exception:
+            self.close()
+            raise
+
+    def __constructServiceMessage(self, template, attributes, text, children):
+        attributeString = ""
+        if attributes:
+            for (key, value) in attributes.items():
+                attributeString += " " + key + "=\"" + value + "\""
+
+        message = template % (self.__service, attributeString)
+
+        if children or text:
+            root = ElementTree.fromstring(message)
+
+            if text:
+                root.text = text
+
+            if children:
+                for child in children:
+                    root.append(child)
+
+            message = ElementTree.tostring(root)
+
+        return message
+
+    def send(self, message):
+        if not self.__sock:
+            raise SessionException("Session is not open to send")
+
+        if self.__cipherOut:
+            message = self.__cipherOut.transform(message)
+
+        lenStr = struct.pack("!I", len(message))
+
+        try:
+            self.__sock.send(lenStr + message)
+        except Exception:
+            self.close()
+            raise
+
+    def recv(self, doStrip=True):
+        if not self.__sock:
+            raise SessionException("Session is not open to receive")
+
+        try:
+            lengthHeader = self.__readFully(4)
+            msgLength = int(struct.unpack("!I", lengthHeader)[0])
+            
+            msg = self.__readFully(msgLength)
+
+        except Exception:
+            self.close()
+            raise
+
+        if self.__cipherIn:
+            if doStrip:
+                msg = string.strip(self.__cipherIn.transform(msg))
+            else:
+                msg = self.__cipherIn.transform(msg)
+
+        return msg
+
+
+    def __readFully(self, msgLength):
+        msg = ""
+        
+        while msgLength > 0:
+            received = self.__sock.recv(msgLength)
+
+            if not received:
+                raise SessionException("Session was closed while receiving msgLength=[%d] len(msg)=[%d] "
+                                       "len(received)=[%d]" % (msgLength, len(msg), len(received)))
+
+            msg = msg + received
+            msgLength = msgLength - len(received)
+
+        return msg
+
+    def close(self, force=False):
+        if not self.__sock:
+            return
+
+        try:
+            if force:
+                self.__sock.shutdown(socket.SHUT_RDWR)
+
+            if self.__sock:
+                self.__sock.close()
+        finally:
+            self.__sock = None
+
+    def __sendAndReceive(self, message):
+        self.send(message)
+        return self.recv()
+
+
+class SessionMonitor(threading.Thread):
+
+    def __init__(self, session, listener=None):
+        threading.Thread.__init__(self)
+
+        self.__session = session
+        self.__listener = listener
+
+    def run(self):
+        while True:
+            try:
+                message = self.__session.recv()
+            except:
+                # the session was closed out from under us
+                break
+
+            try:
+                root = ElementTree.fromstring(message)
+            except:
+                if self.__listener:
+                    try:
+                        self.__listener.invalid_message(message)
+                    except:
+                        pass
+            else:
+                if self.__listener:
+                    try:
+                        self.__listener.message_received(root)
+                    except:
+                        pass
+
+        try:
+            self.close()
+        except:
+            pass
+
+    def close(self):
+        if self.__listener:
+            try:
+                self.__listener.closed()
+            except:
+                pass
+            self.__listener = None
+        self.__session.close(force=True)
+
+
+class BaseListener:
+
+    def message_received(self, root):
+        pass
+
+    def invalid_message(self, message):
+        pass
+
+    def closed(self):
+        pass
+
+from libc.stdlib cimport malloc, free
+from libc.string cimport strcat, strncat, memset, memchr, memcmp, memcpy, memmove        
+        
+cdef class EncodedSession(Session):
 
     """Class for representing an encoded session with the database.
     
@@ -74,20 +352,45 @@ class EncodedSession(Session):
     _takeBytes -- Gets the next length of bytes off the session.
  
     """
+    
+    cdef object __input
+    cdef int __inpos
+    cdef char * __output 
+    cdef int __outputsz
+    cdef int __outputlen 
+    
+    cdef char *x__input
+    cdef int x__inputsz
+    cdef int x__inputlen 
+    
+    cdef int closed
+    
+    cpdef is_closed(self):
+      return self.closed
 
+    cpdef set_closed(self,v):
+      self.closed=v
+      
     def __init__(self, host, port, service='SQL2'):
         """Constructor for the EncodedSession class."""
-        Session.__init__(self, host, port=port, service=service)
+        Session.__init__(self, host, port=port, service=service)        
         self.doConnect()
+        self.__input=""
+        self.__output = NULL
+        self.__outputsz = 0
+        self.__outputlen = 0
+        self.x__input = NULL
+        self.x__inputsz = 0
+        self.x__inputlen = 0
 
-        self.__output = None
-        """ @type : str """
-        self.__input = None
+        
         """ @type : str """
         self.__inpos = 0
         """ @type : int """
         self.closed = False
 
+        
+        
     # Mostly for connections
     def open_database(self, db_name, parameters, cp):
         """
@@ -98,10 +401,8 @@ class EncodedSession(Session):
         self._putMessageId(protocol.OPENDATABASE).putInt(protocol.CURRENT_PROTOCOL_VERSION).putString(db_name).putInt(len(parameters))
         for (k, v) in parameters.iteritems():
             self.putString(k).putString(v)
-        self.putNull().putString(cp.genClientKey())
-
+        self.putNull().putString(cp.genClientKey())        
         self._exchangeMessages()
-
         version = self.getInt()
         serverKey = self.getString()
         salt = self.getString()
@@ -210,16 +511,13 @@ class EncodedSession(Session):
         """
         self._putMessageId(protocol.EXECUTEPREPAREDSTATEMENT)
         self.putInt(prepared_statement.handle).putInt(len(parameters))
-
         for param in parameters:
             self.putValue(param)
-
         self._exchangeMessages()
-
         result = self.getInt()
         rowcount = self.getInt()
-
-        return ExecutionResult(prepared_statement, result, rowcount)
+        r=ExecutionResult(prepared_statement, result, rowcount)
+        return r
 
     def execute_batch_prepared_statement(self, prepared_statement, param_lists):
         """
@@ -362,28 +660,59 @@ class EncodedSession(Session):
         Start a message with the messageId.
         @type messageId int
         """
-        self.__output = ''
+        self.__outputlen = 0
         self.putInt(messageId, isMessageId=True)
         return self
 
-    def putInt(self, value, isMessageId=False):
+        
+    cdef ensure_output_extend(self,int l):
+      cdef char * oldoutput
+      if (self.__outputlen+l>=self.__outputsz):        
+         oldoutput=self.__output
+         self.__outputsz=(self.__outputlen+l+1)*2
+         self.__output=<char *> malloc(self.__outputsz)
+         if oldoutput!=NULL:
+           memcpy(self.__output,oldoutput,self.__outputlen)
+           free(oldoutput)
+      
+    cdef output_append(self,char * buf, int len):    
+           self.ensure_output_extend(len)
+           memcpy(self.__output+self.__outputlen,buf,len)
+           self.__outputlen+=len
+    
+           
+    cdef ensure_input_extend(self,int l):
+      cdef char * oldinput
+      if (self.x__inputlen+l>=self.x__inputsz):        
+         oldinput=self.x__input
+         self.x__inputsz=(self.x__inputlen+l+1)*2
+         self.x__input=<char *> malloc(self.x__inputsz)
+         if oldinput!=NULL:
+           memcpy(self.x__input,oldinput,self.x__inputlen)
+           free(oldinput)
+           
+                   
+    cpdef EncodedSession putInt(self, int value, int isMessageId=0):
         """
         Appends an Integer value to the message.
         @type value int
         @type isMessageId bool
         """
         if value < 32 and value > -11:
-            packed = chr(protocol.INT0 + value)
+            self.ensure_output_extend(1)
+            self.__output[self.__outputlen]=<char>(protocol.INT0 + value)
+            self.__outputlen+=1
         else:
+            self.ensure_output_extend(1)
             if isMessageId:
                 valueStr = toByteString(value)
             else:
                 valueStr = toSignedByteString(value)
-            packed = chr(protocol.INTLEN1 - 1 + len(valueStr)) + valueStr
-        self.__output += packed
+            packed = chr(protocol.INTLEN1 - 1 + len(valueStr)) + valueStr            
+            self.output_append( packed, len(packed))
         return self
 
-    def putScaledInt(self, value):
+    cdef EncodedSession putScaledInt(self, int value):
         """
         Appends a Scaled Integer value to the message.
         @type value decimal.Decimal
@@ -391,10 +720,10 @@ class EncodedSession(Session):
         scale = abs(value.as_tuple()[2])
         valueStr = toSignedByteString(int(value * decimal.Decimal(10**scale)))
         packed = chr(protocol.SCALEDLEN0 + len(valueStr)) + chr(scale) + valueStr
-        self.__output += packed
+        self.output_append(packed,len(packed))
         return self
 
-    def putString(self, value):
+    cpdef EncodedSession putString(self, str value):
         """
         Appends a String to the message.
         @type value str
@@ -405,31 +734,34 @@ class EncodedSession(Session):
         else:
             lengthStr = toByteString(length)
             packed = chr(protocol.UTF8COUNT1 - 1 + len(lengthStr)) + lengthStr + value
-        self.__output += packed
+        self.output_append(packed,len(packed))
         return self
 
-    def putBoolean(self, value):
+    cpdef EncodedSession putBoolean(self, int value):
         """
         Appends a Boolean value to the message.
         @type value bool
         """
-        if value is True:
-            self.__output += chr(protocol.TRUE)
+        if value!=0:
+            self.__output[self.__outputlen] = protocol.TRUE
         else:
-            self.__output += chr(protocol.FALSE)
+            self.__output[self.__outputlen] = protocol.FALSE
+        self.__outputlen+=1            
         return self
 
-    def putNull(self):
+    cpdef putNull(self):
         """Appends a Null value to the message."""
-        self.__output += chr(protocol.NULL)
+        s=chr(protocol.NULL)
+        self.output_append(s,1)
         return self
 
-    def putUUID(self, value):
+    cpdef putUUID(self, value):
         """Appends a UUID to the message."""
-        self.__output += chr(protocol.UUID) + str(value)
+        m= chr(protocol.UUID) + str(value)
+        self.output_append(m,len(m))
         return self
 
-    def putOpaque(self, value):
+    cpdef putOpaque(self, value):
         """Appends an Opaque data value to the message."""
         data = value.string
         length = len(data)
@@ -438,35 +770,35 @@ class EncodedSession(Session):
         else:
             lengthStr = toByteString(length)
             packed = chr(protocol.OPAQUECOUNT1 - 1 + len(lengthStr)) + lengthStr + data
-        self.__output += packed
+        self.output_append(packed,len(packed))
         return self
 
     def putDouble(self, value):
         """Appends a Double to the message."""
         valueStr = struct.pack('!d', value)
         packed = chr(protocol.DOUBLELEN0 + len(valueStr)) + valueStr
-        self.__output += packed
+        self.output_append(packed,len(packed))
         return self
 
     def putMsSinceEpoch(self, value):
         """Appends the MsSinceEpoch value to the message."""
         valueStr = toSignedByteString(value)
         packed = chr(protocol.MILLISECLEN0 + len(valueStr)) + valueStr
-        self.__output += packed
+        self.output_append(packed,len(packed))
         return self
         
     def putNsSinceEpoch(self, value):
         """Appends the NsSinceEpoch value to the message."""
         valueStr = toSignedByteString(value)
         packed = chr(protocol.NANOSECLEN0 + len(valueStr)) + valueStr
-        self.__output += packed
+        self.output_append(packed,len(packed))
         return self
         
     def putMsSinceMidnight(self, value):
         """Appends the MsSinceMidnight value to the message."""
         valueStr = toByteString(value)
         packed = chr(protocol.TIMELEN0 + len(valueStr)) + valueStr
-        self.__output += packed
+        self.output_append(packed,len(packed))
         return self
 
     # Not currently used by NuoDB
@@ -477,7 +809,7 @@ class EncodedSession(Session):
         lengthStr = toByteString(length)
         lenlengthstr = len(lengthStr)
         packed = chr(protocol.BLOBLEN0 + lenlengthstr) + lengthStr + data
-        self.__output += packed
+        self.output_append(packed,len(packed))
         return self
 
     def putClob(self, value):
@@ -485,7 +817,7 @@ class EncodedSession(Session):
         length = len(value)
         lengthStr = toByteString(length)
         packed = chr(protocol.CLOBLEN0 + len(lengthStr)) + lengthStr + value
-        self.__output += packed
+        self.output_append(packed,len(packed))
         return self
         
     def putScaledTime(self, value):
@@ -496,7 +828,7 @@ class EncodedSession(Session):
             packed = chr(protocol.SCALEDTIMELEN1) + chr(0) + chr(0)
         else:
             packed = chr(protocol.SCALEDTIMELEN1 - 1 + len(valueStr)) + chr(scale) + valueStr
-        self.__output += packed
+        self.output_append(packed,len(packed))
         return self
     
     def putScaledTimestamp(self, value):
@@ -507,7 +839,7 @@ class EncodedSession(Session):
             packed = chr(protocol.SCALEDTIMESTAMPLEN1) + chr(0) + chr(0)
         else:
             packed = chr(protocol.SCALEDTIMESTAMPLEN1 - 1 + len(valueStr)) + chr(scale) + valueStr
-        self.__output += packed
+        self.output_append(packed,len(packed))
         return self
         
     def putScaledDate(self, value):
@@ -518,7 +850,7 @@ class EncodedSession(Session):
             packed = chr(protocol.SCALEDDATELEN1) + chr(0) + chr(0)
         else:  
             packed = chr(protocol.SCALEDDATELEN1 - 1 + len(valueStr)) + chr(0) + valueStr
-        self.__output += packed
+        self.output_append(packed,len(packed))
         return self
 
     def putValue(self, value):
@@ -539,8 +871,8 @@ class EncodedSession(Session):
             return self.putScaledTime(value)
         elif isinstance(value, datatype.Binary):
             return self.putOpaque(value)
-        elif value is True or value is False:
-            return self.putBoolean(value)
+        elif value is True or value is False:            
+            return self.putBoolean(1 if value else 0)
         else:
             return self.putString(str(value))
         
@@ -773,18 +1105,18 @@ class EncodedSession(Session):
             return self.getScaledDate()
         
         else:
-            raise NotImplementedError("not implemented")
+            raise NotImplementedError("typecode not implemented")
 
     def _exchangeMessages(self, getResponse=True):
         """Exchange the pending message for an optional response from the server."""
         try:
-            # print "message to server: %s" %  (self.__output)
-            self.send(self.__output)
+            self.send(self.__output[:self.__outputlen])
         finally:
-            self.__output = None
+            self.__outputlen=0
 
         if getResponse is True:
             self.__input = self.recv(False)
+            self.x__input=self.__input
             self.__inpos = 0
             
             error = self.getInt()
@@ -801,8 +1133,9 @@ class EncodedSession(Session):
 
     # Protected utility routines
 
-    def _peekTypeCode(self):
+    cdef int _peekTypeCode(self):
         """Looks at the next Type Code off the session. (Does not move inpos)"""
+        #return <int>(self.__input[self.__inpos])
         return ord(self.__input[self.__inpos])
 
     def _getTypeCode(self):

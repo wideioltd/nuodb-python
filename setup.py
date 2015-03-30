@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 from distutils.core import setup
+from Cython.Build import cythonize
 
 setup(
     name='pynuodb',
@@ -9,6 +10,7 @@ setup(
     description='NuoDB Python driver',
     keywords='nuodb scalable cloud database',
     packages=['pynuodb'],
+    ext_modules = cythonize("pynuodb/encodedsession.pyx"),    
     package_dir={'pynuodb': 'pynuodb'},
     url='https://github.com/nuodb/nuodb-python',
     license='BSD licence, see LICENCE.txt',

@@ -26,12 +26,11 @@ class ResultSet(object):
         """
         @type session EncodedSession
         """
-        if self.results_idx == len(self.results):
-            if not self.complete:
+        while (self.results_idx >= len(self.results)) and (not self.complete):
                 session.fetch_result_set_next(self)
-            else:
+        if self.results_idx >= len(self.results):
                 return None
-
+        
         res = self.results[self.results_idx]
         self.results_idx += 1
         return res

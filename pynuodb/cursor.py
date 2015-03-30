@@ -75,7 +75,7 @@ class Cursor(object):
         """Checks if the cursor is closed."""
         if self.closed:
             raise Error("cursor is closed")
-        if self.session.closed:
+        if self.session.is_closed():
             raise Error("connection is closed")
 
     def _reset(self):
