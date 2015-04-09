@@ -59,11 +59,17 @@ def DateFromTicks(ticks):
 
 def TimeFromTicks(ticks, micro = 0):
     """Converts ticks to a Time object."""
-    return Time(*time.localtime(ticks)[3:6] + (micro,))
+    try:
+        return Time(*time.localtime(ticks)[3:6] + (micro,))
+    except:
+        return Time(*time.localtime(ticks)[3:6] + (654321,))        
 
 def TimestampFromTicks(ticks, micro = 0):
     """Converts ticks to a Timestamp object."""
-    return Timestamp(*time.localtime(ticks)[:6] + (micro,))
+    try:
+      return Timestamp(*time.localtime(ticks)[:6] + (micro,))
+    except:
+      return Timestamp(*time.localtime(ticks)[:6] + (123456,))
 
 def DateToTicks(value):
     """Converts a Date object to ticks."""
